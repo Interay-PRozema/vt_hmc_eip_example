@@ -17,76 +17,65 @@
 #include <QEventLoop>
 #include <QTimer>
 
+// If a windows system, include the winsock library
+#if defined(_WIN32) || defined(WIN32) || defined(_WIN64)
+#include <winsock2.h>
+#define OS_Windows (1)
+#endif
+
+#include <cstdlib>
+#include <sstream>
+#include <cip/connectionManager/NetworkConnectionParams.h>
+#include "SessionInfo.h"
+#include "MessageRouter.h"
+#include "ConnectionManager.h"
+#include "utils/Logger.h"
+#include "utils/Buffer.h"
+
 /* Class */
 
 class HydraulicController : public QObject
 {
-
     Q_OBJECT
 
     public:
-
         // Constructors & Destructors
         HydraulicController();
         ~HydraulicController();
 
         // Connection
-        void connectDevice(const QHostAddress address, const quint16 port, const QString deviceAddress);
-        void disconnectDevice();
-
-        bool connected(){
-            return m_connected;
-        }
+        void connectDevice(const std::string address, const int port);
 
         // Logging
         void setLogging(bool logEnabled){
             m_logEnabled = logEnabled;
         }
 
-        int sendCommand(const QByteArray command);
-        int readResponse(QByteArray *response);
-
+        // Methods
+        int getVendorID(uint16_t *vendorId);
+        int getProductName(std::string *productName);
 
     private:
-        QPointer<QTcpSocket> m_tcpSocket = nullptr;
+        std::string m_address;
+        int m_port = 0;
 
-        const int CONNECTION_TIMEOUT = 2500;
+        std::shared_ptr<eipScanner::SessionInfo> si;
+        std::shared_ptr<eipScanner::MessageRouter> messageRouter;
 
         bool m_logEnabled = true;
 
-        QByteArray m_readBuffer = QByteArrayLiteral("");
-        qint64 m_nrOfBytesWritten = 0;
-        qint64 m_currentCmdSize = 0;
-
     protected:
-        bool m_connected = false;
-
-        QHostAddress m_address;
-        quint16 m_port = 0;
-        QString m_deviceAddress = "";
-
 
 
     public slots:
 
     private slots:
 
-        void slot_deviceConnected();
-        void slot_deviceDisconnected();
-
-        void slot_errorOccurred(QAbstractSocket::SocketError error);
-
-        void slot_readyRead();
-        void slot_bytesWritten(qint64 bytes);
-
     signals:
-
         void signal_deviceConnected();
         void signal_deviceDisconnected();
 
-        void signal_commandSend();
-        void signal_responseReceived();
-
 };
+
 
 #endif // HYDRAULIC_CONTROLLER_H

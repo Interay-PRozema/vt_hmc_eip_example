@@ -9,7 +9,40 @@
 
 #include "hydraulic_controller.h"
 
+
+
+using namespace eipScanner::cip;
+using eipScanner::SessionInfo;
+using eipScanner::MessageRouter;
+using eipScanner::ConnectionManager;
+using eipScanner::cip::connectionManager::ConnectionParameters;
+using eipScanner::cip::connectionManager::NetworkConnectionParams;
+using eipScanner::utils::Buffer;
+using eipScanner::utils::Logger;
+using eipScanner::utils::LogLevel;
+
 /* Definitions */
+
+#define CLASS_ID_IDENTITY               0x01
+#define CLASS_ID_MESSAGE_ROUTER         0x02
+#define CLASS_ID_ASSEMBLY               0x04
+#define CLASS_ID_CONNECTION_MANAGER     0x06
+#define CLASS_ID_QOS                    0x48
+#define CLASS_ID_PORT                   0xF4
+#define CLASS_ID_TCP_IP_INTERFACE       0xF5
+#define CLASS_ID_ETHERNET_LINK          0xF6
+
+
+#define ATTRIBUTE_ID_VENDOR_ID                          1
+#define ATTRIBUTE_ID_DEVICE_TYPE                        2
+#define ATTRIBUTE_ID_PRODUCT_CODE                       3
+#define ATTRIBUTE_ID_REVISION                           4
+#define ATTRIBUTE_ID_STATUS                             5
+#define ATTRIBUTE_ID_SERIALNUMBER                       6
+#define ATTRIBUTE_ID_PRODUCT_NAME                       7
+#define ATTRIBUTE_ID_STATE                              8
+#define ATTRIBUTE_ID_CONFIGURATION_CONSISTENCY_VALUE    9
+#define ATTRIBUTE_ID_HEARTBEAT_INTERVAL                 10
 
 
 /* Variables */
@@ -20,216 +53,90 @@
 // Constructors & Destructors
 HydraulicController::HydraulicController(){
 
-    // Create new tcp socket
-    m_tcpSocket = new QTcpSocket();
-    m_tcpSocket->setParent(nullptr);
 
-    // Connections to the socket
-    connect(m_tcpSocket, &QTcpSocket::connected, this, &HydraulicController::slot_deviceConnected);
-    connect(m_tcpSocket, &QTcpSocket::disconnected, this, &HydraulicController::slot_deviceDisconnected);
-    connect(m_tcpSocket, &QTcpSocket::errorOccurred, this, &HydraulicController::slot_errorOccurred);
-    connect(m_tcpSocket, &QTcpSocket::readyRead, this, &HydraulicController::slot_readyRead);
-    connect(m_tcpSocket, &QTcpSocket::bytesWritten, this, &HydraulicController::slot_bytesWritten);
+#if OS_Windows
+    WSADATA wsaData;
+    int winsockStart = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (winsockStart != 0) {
+        qCritical() << "Failed to start WinSock - error code: " << winsockStart;
+    }
+#endif
+
+
 }
 
 HydraulicController::~HydraulicController(){
-    disconnectDevice();
-    delete m_tcpSocket;
+
+#if OS_Windows
+    WSACleanup();
+#endif
+
+
 }
 
-void HydraulicController::connectDevice(const QHostAddress address, const quint16 port, const QString deviceAddress){
+void HydraulicController::connectDevice(const std::string address, const int port){
 
-    // Check if not already connected
-    if(m_connected){
-        return;
-    }
-
-    // Save data in class
+    // Keep settings
     m_address = address;
     m_port = port;
-    m_deviceAddress = deviceAddress;
 
-    // Attempt to connect
-    m_tcpSocket->connectToHost(m_address, m_port);
-
-    // Create local event loop to give the device to connect
-    QEventLoop loop;
-    connect(this, &HydraulicController::signal_deviceConnected, &loop, &QEventLoop::quit);
-
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-
-    timeout.start(CONNECTION_TIMEOUT);
-    loop.exec();
-
-    // If connection not made in time -> abort connecting
-    if(timeout.remainingTime() < 50){
-        m_tcpSocket->abort();
-        if(m_logEnabled){
-            qWarning() << "VT-HMC: Unable to connect to device with ip: " << address.toString() << " and port: " << port;
-        }
-    }
-
+    // Create the session info and messagerouter
+    si = std::make_shared<SessionInfo>(m_address, m_port);
+    messageRouter = std::make_shared<MessageRouter>(false);
 }
 
-void HydraulicController::disconnectDevice(){
+int HydraulicController::getVendorID(uint16_t *vendorId){
 
-    // Check if connected
-    if(!m_connected){
-        return;
-    }
+    // Send request
+    MessageRouterResponse response = messageRouter->sendRequest(si,
+                                                                ServiceCodes::GET_ATTRIBUTE_SINGLE,
+                                                                EPath(CLASS_ID_IDENTITY, 1, ATTRIBUTE_ID_VENDOR_ID),
+                                                                {});
 
-    // If tcp socket exists, then disconnect
-    if(m_tcpSocket != nullptr){
-        m_tcpSocket->disconnectFromHost();
-        m_tcpSocket->disconnect();
-    }
+    // Check response
+    if (response.getGeneralStatusCode() == GeneralStatusCodes::SUCCESS) {
 
-    // Set connect to false
-    m_connected = false;
+        // Get the data from the response
+        Buffer buffer(response.getData());
+        buffer >> *vendorId;
 
-}
-
-void HydraulicController::slot_deviceConnected(){
-
-    if(m_logEnabled){
-        qInfo() << "VT-HMC: connected";
-    }
-    m_connected = true;
-    emit signal_deviceConnected();
-
-}
-
-void HydraulicController::slot_deviceDisconnected(){
-
-    if(m_logEnabled){
-        qWarning() << "VT-HMC: disconnected";
-    }
-    m_connected = false;
-    emit signal_deviceDisconnected();
-
-}
-
-void HydraulicController::slot_errorOccurred(QAbstractSocket::SocketError error){
-
-    if(m_logEnabled){
-        qWarning() << "VT-HMC: tcp Socket error: " << m_tcpSocket->error() << " - " << m_tcpSocket->errorString();
-    }
-
-}
-
-void HydraulicController::slot_bytesWritten(qint64 bytes){
-
-    m_nrOfBytesWritten = m_nrOfBytesWritten + bytes;
-
-    if(m_nrOfBytesWritten >= m_currentCmdSize){
-        emit signal_commandSend();
-    }
-
-}
-
-
-int HydraulicController::sendCommand(const QByteArray command){
-
-    // Check if tcpsocket exists and is connected
-    if(m_connected == false || m_tcpSocket == nullptr){
-        return -1;
-    }
-
-    // Check if message can be send
-    if(m_tcpSocket->isOpen() && m_tcpSocket->isWritable()){
-
-        // Log
-        if(m_logEnabled){
-
-            // Copy command
-            QByteArray commandLog = command;
-
-            // Replace newline and carraige return for clean log file
-            commandLog.replace('\n', ' ');
-            commandLog.replace('\r', ' ');
-
-            qInfo() << "VT-HMC: command: " << QString(commandLog) << " send to: " << m_address.toString();
-        }
-
-        // Reset values for the onBytesWritten method
-        m_nrOfBytesWritten = 0;
-        m_currentCmdSize = command.size();
-
-        // Write message
-        m_tcpSocket->write(command);
-
-        // Create local event loop to wait for the command to be fully send
-        QEventLoop loop;
-        connect(this, &HydraulicController::signal_commandSend, &loop, &QEventLoop::quit);
-
-        QTimer timeout;
-        timeout.setSingleShot(true);
-        connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-
-        timeout.start(1000);
-        loop.exec();
-
-        // Succes
+        // Success
         return 0;
     }
 
     // Failure
+    qCritical() << "vt-hmc: Error: 0x" << std::hex << response.getGeneralStatusCode();
     return -1;
-
 }
 
-void HydraulicController::slot_readyRead(){
+int HydraulicController::getProductName(std::string *productName){
 
-    m_readBuffer.append(m_tcpSocket->readAll());
+    // Send request
+    // Send request
+    MessageRouterResponse response = messageRouter->sendRequest(si,
+                                                                ServiceCodes::GET_ATTRIBUTE_SINGLE,
+                                                                EPath(CLASS_ID_IDENTITY, 1, ATTRIBUTE_ID_PRODUCT_NAME),
+                                                                {});
+    // Check response
+    if (response.getGeneralStatusCode() == GeneralStatusCodes::SUCCESS) {
 
-    qWarning() << "Vt-HMC: readbuffer: " << m_readBuffer;
+        // Get the data from the response
+        Buffer buffer(response.getData());
 
-    if(m_readBuffer.contains(QString("\r").toUtf8())){
-        emit signal_responseReceived();
+        std::string result;
+        for (uint8_t c : buffer.data()) {
+            result += static_cast<char>(c);
+        }
+
+        *productName = result;
+
+        // Success
+        return 0;
     }
 
+    // Failure
+    qCritical() << "vt-hmc: Error: 0x" << std::hex << response.getGeneralStatusCode();
+    return -1;
 }
 
-int HydraulicController::readResponse(QByteArray *response){
-
-    // Clear the readbuffer in case there is still data in
-    m_readBuffer.clear();
-
-    // Check connection
-    if(m_connected == false || m_tcpSocket == nullptr){
-        return -1;
-    }
-
-    // Create local event loop to wait for the response to be fully received
-    QEventLoop loop;
-    connect(this, &HydraulicController::signal_responseReceived, &loop, &QEventLoop::quit);
-
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-
-    timeout.start(2500);
-    loop.exec();
-
-    // Log
-    if(m_logEnabled){
-
-        // Copy response
-        QByteArray responseLog = m_readBuffer;
-
-        // Replace newline and carraige return for clean log file
-        responseLog.replace('\n', ' ');
-        responseLog.replace('\r', ' ');
-
-        qInfo() << "VT-HMC: response: " << QString(responseLog) << " from: " << m_address.toString();
-    }
-
-    // Return the response
-    if(response != nullptr){
-        *response = m_readBuffer;
-    }
-    return 0;
-}
 
