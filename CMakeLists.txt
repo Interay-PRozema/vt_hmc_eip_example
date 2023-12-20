@@ -18,7 +18,15 @@ add_executable(VT_HMC_Testing
   hydraulic_controller.h
   hydraulic_controller.cpp
 )
-target_link_libraries(VT_HMC_Testing Qt${QT_VERSION_MAJOR}::Core Qt6::Network)
+
+include_directories("C:/Program Files (x86)/EIPScanner/include/EIPScanner")
+
+# Link the EIPScanner library
+target_link_libraries(VT_HMC_Testing
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt6::Network
+    "C:/Program Files (x86)/EIPScanner/lib/EIPScannerS.lib"
+)
 
 include(GNUInstallDirs)
 install(TARGETS VT_HMC_Testing
